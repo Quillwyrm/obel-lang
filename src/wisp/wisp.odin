@@ -645,27 +645,90 @@ read_atom :: proc() -> Value {
 read_string :: proc() -> Value {
 	Reader.index += 1
 	start := Reader.index
+	has_escapes := false
+	decoded: [dynamic]u8
 
 	for Reader.index < len(Reader.source) {
 		ch := Reader.source[Reader.index]
 
 		if ch == '\n' || ch == '\r' {
+			if has_escapes {
+				delete(decoded)
+			}
 			reader_error("unterminated string")
 			return Value{}
 		}
 
 		if ch == '\\' {
-			reader_error("string escapes not implemented")
-			return Value{}
+			if !has_escapes {
+				has_escapes = true
+				decoded = make([dynamic]u8)
+
+				for i := start; i < Reader.index; i += 1 {
+					append(&decoded, Reader.source[i])
+				}
+			}
+
+			Reader.index += 1
+
+			if Reader.index >= len(Reader.source) {
+				delete(decoded)
+				reader_error("unterminated string")
+				return Value{}
+			}
+
+			escaped := Reader.source[Reader.index]
+			Reader.index += 1
+
+			if escaped == '\n' || escaped == '\r' {
+				delete(decoded)
+				reader_error("unterminated string")
+				return Value{}
+			}
+
+			switch escaped {
+			case 'n':
+				append(&decoded, '\n')
+			case 't':
+				append(&decoded, '\t')
+			case 'r':
+				append(&decoded, '\r')
+			case '\\':
+				append(&decoded, '\\')
+			case '"':
+				append(&decoded, '"')
+			case:
+				delete(decoded)
+				reader_error(fmt.tprintf("invalid escape sequence '\\%c'", escaped))
+				return Value{}
+			}
+
+			continue
 		}
 
 		if ch == '"' {
+			if has_escapes {
+				Reader.index += 1
+				text := string(decoded[:])
+				object := new_string_object(text)
+				delete(decoded)
+				return Value(cast(^Object)object)
+			}
+
 			text := Reader.source[start:Reader.index]
 			Reader.index += 1
 			return Value(cast(^Object)new_string_object(text))
 		}
 
+		if has_escapes {
+			append(&decoded, ch)
+		}
+
 		Reader.index += 1
+	}
+
+	if has_escapes {
+		delete(decoded)
 	}
 
 	reader_error("unterminated string")
@@ -1739,6 +1802,7 @@ compile_builtin_opcode :: proc(symbol: ^SymbolObject, args: []Value, dst: int) {
 
 	if symbol.text == "%" ||
 	   symbol.text == "=" ||
+	   symbol.text == "!=" ||
 	   symbol.text == "<" ||
 	   symbol.text == "<=" ||
 	   symbol.text == ">" ||
@@ -1759,6 +1823,9 @@ compile_builtin_opcode :: proc(symbol: ^SymbolObject, args: []Value, dst: int) {
 			emit_mod(dst, operand_base, operand_base + 1)
 		} else if symbol.text == "=" {
 			emit_equal(dst, operand_base, operand_base + 1)
+		} else if symbol.text == "!=" {
+			emit_equal(dst, operand_base, operand_base + 1)
+			emit_not(dst, dst)
 		} else if symbol.text == "<" {
 			emit_less(dst, operand_base, operand_base + 1)
 		} else if symbol.text == "<=" {
@@ -1881,6 +1948,7 @@ compile_list_expr :: proc(list: ^ListObject, dst: int) {
 
 		if (head.text == "%" ||
 		    head.text == "=" ||
+		    head.text == "!=" ||
 		    head.text == "<" ||
 		    head.text == "<=" ||
 		    head.text == ">" ||
@@ -2531,6 +2599,14 @@ native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 	return core_equal(args[0], args[1])
 }
 
+native_not_equal :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("!= expects two arguments")
+		return Value{}
+	}
+	return Value(bool(!values_equal(args[0], args[1])))
+}
+
 native_less :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) != 2 {
 		runtime_error("< expects two arguments")
@@ -2712,6 +2788,7 @@ install_builtins :: proc(vm: ^VM) {
 	bind_native_global(vm, "/", native_div)
 	bind_native_global(vm, "%", native_mod)
 	bind_native_global(vm, "=", native_equal)
+	bind_native_global(vm, "!=", native_not_equal)
 	bind_native_global(vm, "<", native_less)
 	bind_native_global(vm, "<=", native_less_equal)
 	bind_native_global(vm, ">", native_greater)

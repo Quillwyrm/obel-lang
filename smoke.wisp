@@ -32,6 +32,8 @@
       (% -1 8)])
 
 (out [(= 1 1.0)
+      (!= 1 2)
+      (!= 1 1.0)
       (< 1 2)
       (<= 2 2)
       (> 3 2)
@@ -54,6 +56,18 @@
 (write "write")
 (write " + ")
 (print "print")
+
+
+(nl)
+(print "== string escapes ==")
+(nl)
+
+(write "line one\n")
+(write "line two\n")
+(print "quote: \"wisp\"")
+(print "tab:\tend")
+(print "slash: \\")
+(print (+ "a\n" "b"))
 
 
 (nl)
@@ -97,6 +111,8 @@
 
 (def add +)
 (out (add 400 20))
+(def different !=)
+(out (different 1 2))
 (out [ + - * / ])
 
 

@@ -1134,7 +1134,7 @@ Arguments are evaluated left-to-right before the built-in is called.
 | `-`, `*` | 2+ numbers | int or float |
 | `/` | 2+ numbers | float |
 | `%` | 2 numbers | int or float |
-| `=` | 2 values | bool |
+| `=`, `!=` | 2 values | bool |
 | `<`, `<=`, `>`, `>=` | 2 numbers | bool |
 | `not` | 1 value | bool |
 | `len` | 1 value | int |
@@ -1400,9 +1400,12 @@ Only `nil` and `false` are falsey.
 
 ```scheme
 (= a b)
+(!= a b)
 ```
 
-`=` accepts two values and returns a bool.
+`=` and `!=` accept two values and return a bool.
+
+`!=` is the negation of `=`.
 
 Equality rules:
 

@@ -1,0 +1,125 @@
+diff --git a/smoke.wisp b/smoke.wisp
+index f6345b9..98aed6f 100644
+--- a/smoke.wisp
++++ b/smoke.wisp
+@@ -56,6 +56,18 @@
+ (print "print")
+ 
+ 
++(nl)
++(print "== string escapes ==")
++(nl)
++
++(write "line one\n")
++(write "line two\n")
++(print "quote: \"wisp\"")
++(print "tab:\tend")
++(print "slash: \\")
++(print (+ "a\n" "b"))
++
++
+ (nl)
+ (print "== vectors ==")
+ (nl)
+diff --git a/src/wisp/wisp.odin b/src/wisp/wisp.odin
+index 750fd43..bf43662 100644
+--- a/src/wisp/wisp.odin
++++ b/src/wisp/wisp.odin
+@@ -645,29 +645,92 @@ read_atom :: proc() -> Value {
+ read_string :: proc() -> Value {
+ 	Reader.index += 1
+ 	start := Reader.index
++	has_escapes := false
++	decoded: [dynamic]u8
+ 
+ 	for Reader.index < len(Reader.source) {
+ 		ch := Reader.source[Reader.index]
+ 
+ 		if ch == '\n' || ch == '\r' {
++			if has_escapes {
++				delete(decoded)
++			}
+ 			reader_error("unterminated string")
+ 			return Value{}
+ 		}
+ 
+ 		if ch == '\\' {
+-			reader_error("string escapes not implemented")
+-			return Value{}
++			if !has_escapes {
++				has_escapes = true
++				decoded = make([dynamic]u8)
++
++				for i := start; i < Reader.index; i += 1 {
++					append(&decoded, Reader.source[i])
++				}
++			}
++
++			Reader.index += 1
++
++			if Reader.index >= len(Reader.source) {
++				delete(decoded)
++				reader_error("unterminated string")
++				return Value{}
++			}
++
++			escaped := Reader.source[Reader.index]
++			Reader.index += 1
++
++			if escaped == '\n' || escaped == '\r' {
++				delete(decoded)
++				reader_error("unterminated string")
++				return Value{}
++			}
++
++			switch escaped {
++			case 'n':
++				append(&decoded, '\n')
++			case 't':
++				append(&decoded, '\t')
++			case 'r':
++				append(&decoded, '\r')
++			case '\\':
++				append(&decoded, '\\')
++			case '"':
++				append(&decoded, '"')
++			case:
++				delete(decoded)
++				reader_error(fmt.tprintf("invalid escape sequence '\\%c'", escaped))
++				return Value{}
++			}
++
++			continue
+ 		}
+ 
+ 		if ch == '"' {
++			if has_escapes {
++				Reader.index += 1
++				text := string(decoded[:])
++				object := new_string_object(text)
++				delete(decoded)
++				return Value(cast(^Object)object)
++			}
++
+ 			text := Reader.source[start:Reader.index]
+ 			Reader.index += 1
+ 			return Value(cast(^Object)new_string_object(text))
+ 		}
+ 
++		if has_escapes {
++			append(&decoded, ch)
++		}
++
+ 		Reader.index += 1
+ 	}
+ 
++	if has_escapes {
++		delete(decoded)
++	}
++
+ 	reader_error("unterminated string")
+ 	return Value{}
+ }
+diff --git a/wisp.exe b/wisp.exe
+index 08441b9..aa4f10b 100644
+Binary files a/wisp.exe and b/wisp.exe differ
