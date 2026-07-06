@@ -120,6 +120,7 @@ Opcode :: enum u8 {
 	NEW_MAP,     // ABx: A=dst, Bx=initial pair-count hint
 	VECTOR_PUSH, // ABC: A=vector, B=value -> A remains the vector
 	VECTOR_POP,  // ABC: A=dst, B=vector -> removed value goes to A
+	UNPACK_VECTOR, // ABC: A=source vector, B=first dst, C=count
 	SET_INDEX,   // ABC: A=receiver, B=index/key, C=value -> expression result remains in C
 
 	RETURN, // ABx: A=src
@@ -1355,9 +1356,9 @@ load_module :: proc(vm: ^VM, importer_source_name, import_path: string) -> ^Modu
 	if !os.exists(id) {
 		delete(id)
 
-		core_index, core_found := find_module(vm, import_path)
-		if core_found {
-			return &vm.modules[core_index]
+		host_index, host_found := find_module(vm, import_path)
+		if host_found {
+			return &vm.modules[host_index]
 		}
 
 		compile_error(fmt.tprintf("module `%s` not found", import_path))
@@ -1683,6 +1684,12 @@ emit_vector_pop :: proc(builder: ^CodeBuilder, dst, vector_slot: int) {
 	emit_ABC(builder, .VECTOR_POP, dst, vector_slot, 0)
 }
 
+emit_unpack_vector :: proc(builder: ^CodeBuilder, source_slot, first_dst, count: int) {
+	assert(count > 0 && count <= int(max(u8)), "vector destructuring count does not fit u8")
+	record_slots(builder, source_slot, first_dst, first_dst + count - 1)
+	emit_ABC(builder, .UNPACK_VECTOR, source_slot, first_dst, count)
+}
+
 emit_set_index :: proc(builder: ^CodeBuilder, receiver_slot, index_slot, value_slot: int) {
 	record_slots(builder, receiver_slot, index_slot, value_slot)
 	emit_ABC(builder, .SET_INDEX, receiver_slot, index_slot, value_slot)
@@ -1791,7 +1798,7 @@ find_local :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject) -> (LocalBindin
 	return LocalBinding{}, false
 }
 
-symbol_is_reserved_name :: proc(symbol: ^SymbolObject) -> bool {
+symbol_is_reserved_word :: proc(symbol: ^SymbolObject) -> bool {
 	return symbol.text == "def" ||
 	       symbol.text == "set" ||
 	       symbol.text == "do" ||
@@ -1860,7 +1867,7 @@ compile_constant :: proc(builder: ^CodeBuilder, value: Value, dst: int) {
 	emit_load_const(builder, dst, constant_index)
 }
 
-compile_name_expr :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, dst: int) {
+compile_symbol_expr :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, dst: int) {
 	local_binding, local_found := find_local(builder, symbol)
 	if local_found {
 		emit_move(builder, dst, local_binding.slot)
@@ -1947,7 +1954,7 @@ compile_value_def :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 
 	name_object, _ := list.items[1].(^Object)
 	name := cast(^SymbolObject)name_object
-	if symbol_is_reserved_name(name) {
+	if symbol_is_reserved_word(name) {
 		compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
 		return
 	}
@@ -1980,6 +1987,85 @@ compile_value_def :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 	}
 }
 
+compile_vector_destructuring_def :: proc(builder: ^CodeBuilder, list: ^ListObject, pattern: ^VectorObject) {
+	if len(list.items) != 3 {
+		compile_error("vector destructuring `def` expects a pattern and value")
+		return
+	}
+
+	count := len(pattern.items)
+	if count == 0 {
+		compile_error("vector destructuring pattern cannot be empty")
+		return
+	}
+
+	if count > int(max(u8)) {
+		compile_error("vector destructuring supports at most 255 bindings")
+		return
+	}
+
+	for i := 0; i < count; i += 1 {
+		item_object, item_is_object := pattern.items[i].(^Object)
+		if !item_is_object || item_object.kind != .SYMBOL {
+			compile_error("vector destructuring binding must be a name")
+			return
+		}
+
+		name := cast(^SymbolObject)item_object
+		if symbol_is_reserved_word(name) {
+			compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
+			return
+		}
+
+		for j := 0; j < i; j += 1 {
+			previous_object, _ := pattern.items[j].(^Object)
+			previous := cast(^SymbolObject)previous_object
+			if previous == name {
+				compile_error(fmt.tprintf("duplicate definition `%s` in vector destructuring pattern", name.text))
+				return
+			}
+		}
+
+		for j := builder.current_scope_local_start; j < builder.local_count; j += 1 {
+			if builder.local_bindings[j].symbol == name {
+				compile_error(fmt.tprintf("duplicate definition `%s` in the same scope", name.text))
+				return
+			}
+		}
+	}
+
+	source_slot := claim_slot(builder)
+	if Compiler.failed { return }
+
+	// Ordered def: destructured names are not visible while RHS compiles.
+	compile_expr(builder, list.items[2], source_slot)
+	if Compiler.failed { return }
+
+	first_binding_slot := source_slot
+	reserve_slots_until(builder, first_binding_slot + count)
+	if Compiler.failed { return }
+
+	emit_unpack_vector(builder, source_slot, first_binding_slot, count)
+
+	for i := 0; i < count; i += 1 {
+		item_object, _ := pattern.items[i].(^Object)
+		name := cast(^SymbolObject)item_object
+
+		binding := LocalBinding{
+			symbol  = name,
+			slot    = first_binding_slot + i,
+			mutable = true,
+		}
+
+		builder.local_bindings[builder.local_count] = binding
+		builder.local_count += 1
+
+		if builder.parent == nil {
+			append(&builder.file_bindings, binding)
+		}
+	}
+}
+
 compile_named_fn_def :: proc(builder: ^CodeBuilder, def_list: ^ListObject, signature: ^ListObject) {
 	if len(signature.items) == 0 {
 		compile_error("function `def` signature must start with a name")
@@ -1993,7 +2079,7 @@ compile_named_fn_def :: proc(builder: ^CodeBuilder, def_list: ^ListObject, signa
 	}
 
 	name := cast(^SymbolObject)name_object
-	if symbol_is_reserved_name(name) {
+	if symbol_is_reserved_word(name) {
 		compile_error(fmt.tprintf("cannot define reserved name `%s`", name.text))
 		return
 	}
@@ -2021,7 +2107,7 @@ compile_named_fn_def :: proc(builder: ^CodeBuilder, def_list: ^ListObject, signa
 		}
 
 		param := cast(^SymbolObject)param_object
-		if symbol_is_reserved_name(param) {
+		if symbol_is_reserved_word(param) {
 			compile_error(fmt.tprintf("cannot use reserved name `%s` as parameter", param.text))
 			return
 		}
@@ -2110,7 +2196,7 @@ compile_def :: proc(builder: ^CodeBuilder, form: Value) {
 
 	binding_object, binding_is_object := list.items[1].(^Object)
 	if !binding_is_object {
-		compile_error("`def` binding must be a name or function signature")
+		compile_error("`def` binding must be a name, function signature, or vector destructuring pattern")
 		return
 	}
 
@@ -2124,7 +2210,12 @@ compile_def :: proc(builder: ^CodeBuilder, form: Value) {
 		return
 	}
 
-	compile_error("`def` binding must be a name or function signature")
+	if binding_object.kind == .VECTOR {
+		compile_vector_destructuring_def(builder, list, cast(^VectorObject)binding_object)
+		return
+	}
+
+	compile_error("`def` binding must be a name, function signature, or vector destructuring pattern")
 }
 
 compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject) {
@@ -2146,7 +2237,7 @@ compile_import :: proc(builder: ^CodeBuilder, list: ^ListObject) {
 		}
 
 		alias := cast(^SymbolObject)alias_object
-		if symbol_is_reserved_name(alias) {
+		if symbol_is_reserved_word(alias) {
 			compile_error(fmt.tprintf("cannot use reserved name `%s` as import namespace", alias.text))
 			return
 		}
@@ -2528,7 +2619,7 @@ compile_set :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	compile_error("invalid `set` target")
 }
 
-compile_ordinary_call :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
+compile_call :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	argument_count := len(list.items) - 1
 	if argument_count > int(max(u8)) {
 		compile_error("call has too many arguments")
@@ -2552,7 +2643,7 @@ compile_ordinary_call :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int
 	emit_move(builder, dst, base)
 }
 
-compile_builtin_opcode :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, args: []Value, dst: int) {
+compile_builtin_fast_path :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, args: []Value, dst: int) {
 	// The caller has already resolved an unshadowed supplied builtin.
 	if symbol.text == "+" ||
 	   symbol.text == "-" ||
@@ -2670,7 +2761,7 @@ compile_builtin_opcode :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, arg
 		return
 	}
 
-	assert(false, "compile_builtin_opcode expected opcode-backed builtin")
+	assert(false, "compile_builtin_fast_path expected opcode-backed builtin")
 }
 
 compile_fn :: proc(parent: ^CodeBuilder, list: ^ListObject, dst: int) {
@@ -2699,7 +2790,7 @@ compile_fn :: proc(parent: ^CodeBuilder, list: ^ListObject, dst: int) {
 		}
 
 		param := cast(^SymbolObject)param_object
-		if symbol_is_reserved_name(param) {
+		if symbol_is_reserved_word(param) {
 			compile_error(fmt.tprintf("cannot use reserved name `%s` as parameter", param.text))
 			return
 		}
@@ -2766,7 +2857,7 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 
 	head_object, head_is_object := list.items[0].(^Object)
 	if !head_is_object || head_object.kind != .SYMBOL {
-		compile_ordinary_call(builder, list, dst)
+		compile_call(builder, list, dst)
 		return
 	}
 
@@ -2819,7 +2910,7 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	}
 
 	if builtin_shadowed {
-		compile_ordinary_call(builder, list, dst)
+		compile_call(builder, list, dst)
 		return
 	}
 
@@ -2831,7 +2922,7 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 		   head.text == "-" ||
 		   head.text == "*" ||
 		   head.text == "/" {
-			compile_builtin_opcode(builder, head, list.items[1:], dst)
+			compile_builtin_fast_path(builder, head, list.items[1:], dst)
 			return
 		}
 
@@ -2843,24 +2934,24 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 		    head.text == ">" ||
 		    head.text == ">=") &&
 		   argument_count == 2 {
-			compile_builtin_opcode(builder, head, list.items[1:], dst)
+			compile_builtin_fast_path(builder, head, list.items[1:], dst)
 			return
 		}
 
 		if (head.text == "not" ||
 		    head.text == "len") &&
 		   argument_count == 1 {
-			compile_builtin_opcode(builder, head, list.items[1:], dst)
+			compile_builtin_fast_path(builder, head, list.items[1:], dst)
 			return
 		}
 
 		if (head.text == "push" && argument_count >= 2) ||
 		   (head.text == "pop" && argument_count == 1) {
-			compile_builtin_opcode(builder, head, list.items[1:], dst)
+			compile_builtin_fast_path(builder, head, list.items[1:], dst)
 			return
 		}
 
-		compile_ordinary_call(builder, list, dst)
+		compile_call(builder, list, dst)
 		return
 	}
 
@@ -2895,7 +2986,7 @@ compile_expr :: proc(builder: ^CodeBuilder, value: Value, dst: int) {
 			compile_constant(builder, value, dst)
 
 		case .SYMBOL:
-			compile_name_expr(builder, cast(^SymbolObject)v, dst)
+			compile_symbol_expr(builder, cast(^SymbolObject)v, dst)
 
 		case .LIST:
 			compile_list_expr(builder, cast(^ListObject)v, dst)
@@ -3108,13 +3199,13 @@ run_code :: proc(code: ^Code) -> Value {
 			result: Value
 			#partial switch op {
 			case .ADD:
-				result = core_add(args)
+				result = op_add(args)
 			case .SUB:
-				result = core_sub(args)
+				result = op_sub(args)
 			case .MUL:
-				result = core_mul(args)
+				result = op_mul(args)
 			case .DIV:
-				result = core_div(args)
+				result = op_div(args)
 			}
 
 			// Error returns are disposable and must not be stored in dst.
@@ -3133,17 +3224,17 @@ run_code :: proc(code: ^Code) -> Value {
 			result: Value
 			#partial switch op {
 			case .MOD:
-				result = core_mod(lhs, rhs)
+				result = op_mod(lhs, rhs)
 			case .EQUAL:
-				result = core_equal(lhs, rhs)
+				result = op_equal(lhs, rhs)
 			case .LESS:
-				result = core_less(lhs, rhs)
+				result = op_less(lhs, rhs)
 			case .LESS_EQUAL:
-				result = core_less_equal(lhs, rhs)
+				result = op_less_equal(lhs, rhs)
 			case .GREATER:
-				result = core_greater(lhs, rhs)
+				result = op_greater(lhs, rhs)
 			case .GREATER_EQUAL:
-				result = core_greater_equal(lhs, rhs)
+				result = op_greater_equal(lhs, rhs)
 			}
 
 			if vm.error_string != "" { return Value{} }
@@ -3158,9 +3249,9 @@ run_code :: proc(code: ^Code) -> Value {
 			result: Value
 			#partial switch op {
 			case .NOT:
-				result = core_not(src)
+				result = op_not(src)
 			case .LEN:
-				result = core_len(src)
+				result = op_len(src)
 			}
 
 			if vm.error_string != "" { return Value{} }
@@ -3276,15 +3367,37 @@ run_code :: proc(code: ^Code) -> Value {
 		case .VECTOR_PUSH:
 			// A already holds the vector and remains the result after mutation.
 			inst := InstABC(word)
-			core_push(vm.slots[frame.slot_base + int(inst.a)], vm.slots[frame.slot_base + int(inst.b)])
+			op_push(vm.slots[frame.slot_base + int(inst.a)], vm.slots[frame.slot_base + int(inst.b)])
 			if vm.error_string != "" { return Value{} }
 
 		case .VECTOR_POP:
 			// Validate the pop before replacing A with the removed value.
 			inst := InstABC(word)
-			result := core_pop(vm.slots[frame.slot_base + int(inst.b)])
+			result := op_pop(vm.slots[frame.slot_base + int(inst.b)])
 			if vm.error_string != "" { return Value{} }
 			vm.slots[frame.slot_base + int(inst.a)] = result
+
+		case .UNPACK_VECTOR:
+			inst := InstABC(word)
+			source_slot := frame.slot_base + int(inst.a)
+			first_dst := frame.slot_base + int(inst.b)
+			count := int(inst.c)
+
+			source_object, source_is_object := vm.slots[source_slot].(^Object)
+			if !source_is_object || source_object.kind != .VECTOR {
+				runtime_error("vector destructuring expects vector")
+				return Value{}
+			}
+
+			vector := cast(^VectorObject)source_object
+			if len(vector.items) < count {
+				runtime_error(fmt.tprintf("vector destructuring expected at least %d values, got %d", count, len(vector.items)))
+				return Value{}
+			}
+
+			for i := 0; i < count; i += 1 {
+				vm.slots[first_dst + i] = vector.items[i]
+			}
 
 		case .SET_INDEX:
 			// C remains the set-expression result; this opcode only mutates A.

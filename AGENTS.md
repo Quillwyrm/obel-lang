@@ -13,7 +13,7 @@ odin build src -out:rite.exe -o:speed
 Run a file:
 
 ```powershell
-.\rite.exe smoke.rite
+.\rite.exe _tests\smoke.rite
 ```
 
 Evaluate a source string:
@@ -36,6 +36,21 @@ Any other arguments print:
 usage: rite <file>
        rite eval <string>
 ```
+
+## Current docs layout
+
+Current intentional docs live in `_docs/`:
+
+```text
+_docs/ref.md
+_docs/glossary.md
+_docs/implementation-record.md
+_docs/core-modules.md
+```
+
+`_work/` is scratch/planning/prior-art. Notes there may be useful but are not canonical.
+
+`_tests/` is local ignored smoke material.
 
 ## My general coding/design ethos
 
@@ -126,81 +141,77 @@ A good answer should usually include:
 
 ## Odin constraint
 
-If discussing Odin code, use only official documented Odin syntax and core:lib calls.
+If discussing or editing Odin code, use only official documented Odin syntax and core library calls.
 
-Do not infer Odin syntax from C, Go, Zig, Jai, C++, or any other language.
+Do not infer Odin syntax from C, Go, Zig, Jai, C++, Lua, Rust, Python, or any other language.
 
 If unsure, say:
 
 > Unknown in Odin.
 
-Then ask me to provide the source, or check official Odin docs if browsing is available.
+Then inspect nearby source, check official Odin docs/source, or make a tiny probe and run:
 
-## Project: Veld
+```powershell
+odin check path\to\probe -no-entry-point
+```
 
-Veld is the current name for my new language idea, evolved from an older pixel/raster-oriented language idea called Spall.
+Delete probes after use. Do not produce Odin-shaped pseudocode and call it Odin.
 
-The name “Veld” is connected to “field.” The language is interested in fields, grids, dense rectangular sampled data, raster-ish computation, spatial data, and compositional data transforms, but it should not be trapped as a “pixel language.”
+Odin package facts used in this repo:
 
-Veld may still support image/pixel/grid work strongly, but the design should be broader: fields, sampled spaces, dense containers, transforms, masks, grids, vectors, possibly simulation-ish or procedural generation-ish use cases.
+* A package is a directory of `.odin` files with the same `package` declaration.
+* Imports are package imports, not file imports.
+* All files in `src/rite/` share `package rite`.
+* `main.odin` imports the `rite` package.
 
-Important current concept:
+Current project shape:
 
-* A grid/field-like container is a homogeneous dense rectangular container.
-* It is indexed like `[x, y]`.
-* It can hold all value types, including vectors.
-* It is not necessarily just pixels.
-* “Field” may become the name for the Grid type, but that is not locked.
+```text
+src/
+  main.odin          package main
+  rite/
+    rite.odin        package rite
+    core.odin        package rite
+```
 
-Do not assume Veld must preserve all old Spall semantics. Spall is history/context, not a prison.
+Odin style rules for this project:
 
-## Archived older branch: Spall / spall0
+* `:=` declares a variable and infers type.
+* `::` declares constants, named types, and procedure entities.
+* Anonymous struct state is valid when the type itself does not need a name.
+* Use named types only when the type appears in signatures, has real domain meaning, or multiple values need the same type.
+* Dynamic arrays use `[dynamic]T`; append with `append(&items, value)`.
+* Slices use `[]T`; `items[:]` is a view over existing storage.
+* Variadic parameters like `slots: ..int` are valid, but use them only for real repeated invariants.
+* Odin switch cases do not fall through by default.
+* Use `#partial switch` only when partial handling is intentional.
+* Do not add `_ = param` unless the compiler requires it in that exact context.
+* Prefer clear named assertion flags over generic `ok` when checking union values.
+* Avoid compact `if init; cond` and type switches when direct assertions read clearer locally.
 
-Spall0 was the older art/indexed-raster DSL branch.
+Known LLM failure modes to avoid:
 
-Known Spall0-ish ideas:
+* claiming Odin needs a named type before trying `:= struct {...}{}`
+* wrapping `append` in invented allocation panic logic by default
+* importing habits from C/Go/Zig/Jai/C++
+* adding stubs for unimplemented opcodes
+* preserving bad names because they already exist
+* adding a helper because a plan mentioned one
+* claiming `Unknown in Odin` and then writing guessed code anyway
 
-* Declaration used `:`.
-* Assignment used `=`.
-* 2D indexing was canonical as `buf[x, y]` / `mask[x, y]`, not nested row indexing.
-* Hob-style directed pipes existed: `lhs => rhs_using_^`, where `^` is the piped value.
-* Control flow was end-delimited:
+## Project: Rite
 
-  * `if ... else if ... else ... end`
-* `else if` was a flat conditional-chain arm, not nested `else { if ... }`.
-* Truthiness: false/nil falsey, everything else truthy.
-* `buffer` was originally a 2D int raster.
-* `mask` was originally a 2D bool/selection-ish raster.
+Rite is the current language/runtime in this repo. It is a small dynamic Lisp-shaped language written in Odin, with reader-tree compilation, bytecode execution, mutable vectors, mutable maps, lexical functions/closures, modules, and core built-ins.
 
-Treat those as design material, not final Veld law.
+The source code is canonical. `_docs/ref.md` describes the intended current language surface, but docs can drift during design. If source and notes disagree, inspect the source and flag the drift.
 
-## Veld design posture
-
-Veld should be allowed to do things differently from Kiln and Spall.
-
-Do not assume:
-
-* Veld must copy Kiln syntax.
-* Veld must copy Kiln runtime architecture.
-* Veld must be dynamic just because Kiln is dynamic.
-* Veld must use the same control flow, module model, value model, or collection semantics.
-* Veld must use a stack VM just because Kiln does.
-* Veld must keep Spall pixel assumptions.
-
-When comparing options, explicitly say whether a choice is:
-
-* inherited from Kiln,
-* inherited from Spall0,
-* newly chosen for Veld,
-* or still undecided.
-
-Veld’s design should be judged by whether it makes the field/grid/data-transform model clearer and more powerful, not by whether it resembles my previous language.
+Do not infer Rite semantics from Kiln, Lua, Lisp, Clojure, Scheme, or any other language. Prior art can inform naming and tradeoffs, but Rite semantics must be explicit in source or docs.
 
 ## Project: Kiln context
 
 I have already semi-built another language/runtime called **Kiln**.
 
-Kiln is a dynamic, procedural, non-OOP, modern C-style scripting language/runtime. It is real implementation experience and a useful reference point, but it should not overdetermine Veld.
+Kiln is a dynamic, procedural, non-OOP, modern C-style scripting language/runtime. It is real implementation experience and a useful reference point, but it should not overdetermine Rite.
 
 Kiln current/known semantics include:
 
@@ -246,7 +257,7 @@ Kiln has useful implementation lessons:
 * Cheap derivation is often better than stored/memoized flags.
 * Performance is decent already, so do not cargo-cult “Lua did it this way” or “VMs usually do X.”
 
-Kiln matters because it gives me tested instincts and code patterns. But Veld is allowed to be a different language with different goals.
+Kiln matters because it gives me tested instincts and code patterns. But Rite is allowed to be a different language with different goals.
 
 ## How to work with me
 
@@ -303,7 +314,7 @@ No apologetic fluff.
 No “this gets to the heart of...”
 No overexplaining obvious basics unless I ask.
 
-I am trying to build clear, honest systems. Help me keep Veld that way.
+I am trying to build clear, honest systems. Help me keep Rite that way.
 
 
 # CORE ETHOS

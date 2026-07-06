@@ -5,6 +5,27 @@ import "core:math"
 import "core:strings"
 
 
+// Native function binding =========================================================================
+
+new_native_function_object :: proc(native: NativeProc) -> ^NativeFunctionObject {
+	function := new(NativeFunctionObject)
+	function.header.kind = .NATIVE_FUNCTION
+	function.native = native
+	return function
+}
+
+bind_native_function :: proc(vm: ^VM, bindings: ^[dynamic]Binding, name: string, native: NativeProc) {
+	symbol := intern_symbol(vm, name)
+	function := new_native_function_object(native)
+
+	append(bindings, Binding{
+		symbol  = symbol,
+		value   = Value(cast(^Object)function),
+		mutable = false,
+	})
+}
+
+
 // Builtin install =================================================================================
 
 // Supplied native builtins are immutable but may be shadowed by user bindings.
@@ -13,25 +34,24 @@ bind_native_builtin :: proc(vm: ^VM, name: string, native: NativeProc) -> int {
 	_, found := find_builtin(vm, symbol)
 	assert(!found, "duplicate supplied builtin binding")
 
-	function := new(NativeFunctionObject)
-	function.header.kind = .NATIVE_FUNCTION
-	function.native = native
+	function := new_native_function_object(native)
 
 	append(&vm.builtins, Binding{
 		symbol  = symbol,
 		value   = Value(cast(^Object)function),
 		mutable = false,
 	})
+
 	return len(vm.builtins) - 1
 }
 
 
-// Core operations ================================================================================
+// Operation semantics =============================================================================
 
 // Numeric +, -, and * stay int while all operands are ints.
 // + concatenates display text when any operand is a string; / always returns float.
 
-core_add :: proc(args: []Value) -> Value {
+op_add :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("+ expects two or more arguments")
 		return Value{}
@@ -103,7 +123,7 @@ core_add :: proc(args: []Value) -> Value {
 	return Value(float_result)
 }
 
-core_sub :: proc(args: []Value) -> Value {
+op_sub :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("- expects two or more arguments")
 		return Value{}
@@ -154,7 +174,7 @@ core_sub :: proc(args: []Value) -> Value {
 	return Value(float_result)
 }
 
-core_mul :: proc(args: []Value) -> Value {
+op_mul :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("* expects two or more arguments")
 		return Value{}
@@ -200,7 +220,7 @@ core_mul :: proc(args: []Value) -> Value {
 	return Value(float_result)
 }
 
-core_div :: proc(args: []Value) -> Value {
+op_div :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("/ expects two or more arguments")
 		return Value{}
@@ -245,7 +265,7 @@ core_div :: proc(args: []Value) -> Value {
 	return Value(float_result)
 }
 
-core_mod :: proc(lhs, rhs: Value) -> Value {
+op_mod :: proc(lhs, rhs: Value) -> Value {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 
@@ -331,11 +351,11 @@ values_equal :: proc(lhs, rhs: Value) -> bool {
 	return left_object == right_object
 }
 
-core_equal :: proc(lhs, rhs: Value) -> Value {
+op_equal :: proc(lhs, rhs: Value) -> Value {
 	return Value(bool(values_equal(lhs, rhs)))
 }
 
-core_less :: proc(lhs, rhs: Value) -> Value {
+op_less :: proc(lhs, rhs: Value) -> Value {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 	if left_is_int && right_is_int {
@@ -361,7 +381,7 @@ core_less :: proc(lhs, rhs: Value) -> Value {
 	return Value(bool(left_float < right_float))
 }
 
-core_less_equal :: proc(lhs, rhs: Value) -> Value {
+op_less_equal :: proc(lhs, rhs: Value) -> Value {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 	if left_is_int && right_is_int {
@@ -387,7 +407,7 @@ core_less_equal :: proc(lhs, rhs: Value) -> Value {
 	return Value(bool(left_float <= right_float))
 }
 
-core_greater :: proc(lhs, rhs: Value) -> Value {
+op_greater :: proc(lhs, rhs: Value) -> Value {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 	if left_is_int && right_is_int {
@@ -413,7 +433,7 @@ core_greater :: proc(lhs, rhs: Value) -> Value {
 	return Value(bool(left_float > right_float))
 }
 
-core_greater_equal :: proc(lhs, rhs: Value) -> Value {
+op_greater_equal :: proc(lhs, rhs: Value) -> Value {
 	left_int, left_is_int := lhs.(i64)
 	right_int, right_is_int := rhs.(i64)
 	if left_is_int && right_is_int {
@@ -446,11 +466,11 @@ value_is_falsey :: proc(value: Value) -> bool {
 	return is_bool && !boolean
 }
 
-core_not :: proc(value: Value) -> Value {
+op_not :: proc(value: Value) -> Value {
 	return Value(bool(value_is_falsey(value)))
 }
 
-core_len :: proc(value: Value) -> Value {
+op_len :: proc(value: Value) -> Value {
 	object, is_object := value.(^Object)
 	if !is_object {
 		runtime_error("len expects a vector, map, or string")
@@ -472,7 +492,7 @@ core_len :: proc(value: Value) -> Value {
 	return Value{}
 }
 
-core_push :: proc(vector_value, item: Value) -> Value {
+op_push :: proc(vector_value, item: Value) -> Value {
 	vector_object, vector_is_object := vector_value.(^Object)
 	if !vector_is_object || vector_object.kind != .VECTOR {
 		runtime_error("push expects a vector as its first argument")
@@ -484,7 +504,7 @@ core_push :: proc(vector_value, item: Value) -> Value {
 	return vector_value
 }
 
-core_pop :: proc(vector_value: Value) -> Value {
+op_pop :: proc(vector_value: Value) -> Value {
 	vector_object, vector_is_object := vector_value.(^Object)
 	if !vector_is_object || vector_object.kind != .VECTOR {
 		runtime_error("pop expects a vector")
@@ -505,22 +525,22 @@ core_pop :: proc(vector_value: Value) -> Value {
 
 // (+ value value...) number|string; Numeric sum, or display-text concatenation if any argument is a string.
 native_add :: proc(vm: ^VM, args: []Value) -> Value {
-	return core_add(args)
+	return op_add(args)
 }
 
 // (- number number...) number; Numeric subtraction.
 native_sub :: proc(vm: ^VM, args: []Value) -> Value {
-	return core_sub(args)
+	return op_sub(args)
 }
 
 // (* number number...) number; Numeric multiplication.
 native_mul :: proc(vm: ^VM, args: []Value) -> Value {
-	return core_mul(args)
+	return op_mul(args)
 }
 
 // (/ number number...) float; Numeric division.
 native_div :: proc(vm: ^VM, args: []Value) -> Value {
-	return core_div(args)
+	return op_div(args)
 }
 
 // (% number number) number; Remainder.
@@ -529,7 +549,7 @@ native_mod :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("% expects two arguments")
 		return Value{}
 	}
-	return core_mod(args[0], args[1])
+	return op_mod(args[0], args[1])
 }
 
 // (= left right) bool; true if values are equal by Rite equality.
@@ -538,7 +558,7 @@ native_equal :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("= expects two arguments")
 		return Value{}
 	}
-	return core_equal(args[0], args[1])
+	return op_equal(args[0], args[1])
 }
 
 // (!= left right) bool; true if values are not equal by Rite equality.
@@ -556,7 +576,7 @@ native_less :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("< expects two arguments")
 		return Value{}
 	}
-	return core_less(args[0], args[1])
+	return op_less(args[0], args[1])
 }
 
 // (<= left right) bool; Numeric less-than-or-equal.
@@ -565,7 +585,7 @@ native_less_equal :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("<= expects two arguments")
 		return Value{}
 	}
-	return core_less_equal(args[0], args[1])
+	return op_less_equal(args[0], args[1])
 }
 
 // (> left right) bool; Numeric greater-than.
@@ -574,7 +594,7 @@ native_greater :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("> expects two arguments")
 		return Value{}
 	}
-	return core_greater(args[0], args[1])
+	return op_greater(args[0], args[1])
 }
 
 // (>= left right) bool; Numeric greater-than-or-equal.
@@ -583,7 +603,7 @@ native_greater_equal :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error(">= expects two arguments")
 		return Value{}
 	}
-	return core_greater_equal(args[0], args[1])
+	return op_greater_equal(args[0], args[1])
 }
 
 // (not value) bool; true if value is falsey.
@@ -592,7 +612,7 @@ native_not :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("not expects one argument")
 		return Value{}
 	}
-	return core_not(args[0])
+	return op_not(args[0])
 }
 
 // (nil? value) bool; true if value is nil.
@@ -691,7 +711,7 @@ native_len :: proc(vm: ^VM, args: []Value) -> Value {
 		runtime_error("len expects one argument")
 		return Value{}
 	}
-	return core_len(args[0])
+	return op_len(args[0])
 }
 
 // (copy value) value; Shallow copy of a vector or map.
@@ -858,7 +878,7 @@ native_push :: proc(vm: ^VM, args: []Value) -> Value {
 
 	vector_value := args[0]
 	for i := 1; i < len(args); i += 1 {
-		core_push(vector_value, args[i])
+		op_push(vector_value, args[i])
 		if vm.error_string != "" { return Value{} }
 	}
 
@@ -872,7 +892,7 @@ native_pop :: proc(vm: ^VM, args: []Value) -> Value {
 		return Value{}
 	}
 
-	return core_pop(args[0])
+	return op_pop(args[0])
 }
 
 // (insert vector index value) vector; Insert value into vector at index.
@@ -1110,11 +1130,11 @@ native_write :: proc(vm: ^VM, args: []Value) -> Value {
 }
 
 
-// Core module install ============================================================================
+// Host module install ============================================================================
 
-install_module :: proc(vm: ^VM, id: string, exports: []Binding) {
+install_host_module :: proc(vm: ^VM, id: string, exports: []Binding) {
 	_, found := find_module(vm, id)
-	assert(!found, "duplicate core module")
+	assert(!found, "duplicate host module")
 
 	final_exports := make([]Binding, len(exports))
 	copy(final_exports, exports)
@@ -1124,23 +1144,6 @@ install_module :: proc(vm: ^VM, id: string, exports: []Binding) {
 		loading = false,
 		code    = nil,
 		exports = final_exports,
-	})
-}
-
-module_bind_native :: proc(vm: ^VM, exports: ^[dynamic]Binding, name: string, native: NativeProc) {
-	symbol := intern_symbol(vm, name)
-	for export in exports {
-		assert(export.symbol != symbol, "duplicate core module export")
-	}
-
-	function := new(NativeFunctionObject)
-	function.header.kind = .NATIVE_FUNCTION
-	function.native = native
-
-	append(exports, Binding{
-		symbol  = symbol,
-		value   = Value(cast(^Object)function),
-		mutable = false,
 	})
 }
 
@@ -1385,19 +1388,19 @@ native_str_bytes :: proc(vm: ^VM, args: []Value) -> Value {
 install_core_modules :: proc(vm: ^VM) {
 	str_exports := make([dynamic]Binding)
 
-	module_bind_native(vm, &str_exports, "has?", native_str_has)
-	module_bind_native(vm, &str_exports, "prefix?", native_str_prefix)
-	module_bind_native(vm, &str_exports, "suffix?", native_str_suffix)
-	module_bind_native(vm, &str_exports, "split", native_str_split)
-	module_bind_native(vm, &str_exports, "slice", native_str_slice)
-	module_bind_native(vm, &str_exports, "replace", native_str_replace)
-	module_bind_native(vm, &str_exports, "trim", native_str_trim)
-	module_bind_native(vm, &str_exports, "lower", native_str_lower)
-	module_bind_native(vm, &str_exports, "upper", native_str_upper)
-	module_bind_native(vm, &str_exports, "byte", native_str_byte)
-	module_bind_native(vm, &str_exports, "bytes", native_str_bytes)
+	bind_native_function(vm, &str_exports, "has?", native_str_has)
+	bind_native_function(vm, &str_exports, "prefix?", native_str_prefix)
+	bind_native_function(vm, &str_exports, "suffix?", native_str_suffix)
+	bind_native_function(vm, &str_exports, "split", native_str_split)
+	bind_native_function(vm, &str_exports, "slice", native_str_slice)
+	bind_native_function(vm, &str_exports, "replace", native_str_replace)
+	bind_native_function(vm, &str_exports, "trim", native_str_trim)
+	bind_native_function(vm, &str_exports, "lower", native_str_lower)
+	bind_native_function(vm, &str_exports, "upper", native_str_upper)
+	bind_native_function(vm, &str_exports, "byte", native_str_byte)
+	bind_native_function(vm, &str_exports, "bytes", native_str_bytes)
 
-	install_module(vm, "str", str_exports[:])
+	install_host_module(vm, "str", str_exports[:])
 	delete(str_exports)
 }
 
