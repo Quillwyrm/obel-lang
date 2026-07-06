@@ -1,7 +1,10 @@
 package rite
 
 import "core:fmt"
+import "core:io"
 import "core:math"
+import "core:os"
+import filepath "core:path/filepath"
 import "core:strings"
 
 
@@ -26,7 +29,7 @@ bind_native_function :: proc(vm: ^VM, bindings: ^[dynamic]Binding, name: string,
 }
 
 
-// Builtin install =================================================================================
+// Builtin binding ================================================================================
 
 // Supplied native builtins are immutable but may be shadowed by user bindings.
 bind_native_builtin :: proc(vm: ^VM, name: string, native: NativeProc) -> int {
@@ -521,6 +524,29 @@ op_pop :: proc(vector_value: Value) -> Value {
 }
 
 
+// Native argument helpers ========================================================================
+
+require_string_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (string, bool) {
+	object, is_object := args[index].(^Object)
+	if !is_object || object.kind != .STRING {
+		runtime_error(fmt.tprintf("%s expects %s argument to be string", proc_name, arg_name))
+		return "", false
+	}
+
+	return (cast(^StringObject)object).text, true
+}
+
+require_int_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (i64, bool) {
+	value, is_int := args[index].(i64)
+	if !is_int {
+		runtime_error(fmt.tprintf("%s expects %s argument to be int", proc_name, arg_name))
+		return 0, false
+	}
+
+	return value, true
+}
+
+
 // Native builtins ================================================================================
 
 // (+ value value...) number|string; Numeric sum, or display-text concatenation if any argument is a string.
@@ -836,6 +862,28 @@ native_type :: proc(vm: ^VM, args: []Value) -> Value {
 	return Value(cast(^Object)new_string_object(type_name))
 }
 
+// (str value...) string; Concatenate display text for each value.
+native_str :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) == 0 {
+		return Value(cast(^Object)new_string_object(""))
+	}
+
+	parts := make([dynamic]string)
+	parents := make([dynamic]^Object)
+
+	for arg in args {
+		append_value_text(&parts, arg, &parents)
+	}
+
+	text := strings.concatenate(parts[:])
+
+	delete(parts)
+	delete(parents)
+	defer delete(text)
+
+	return Value(cast(^Object)new_string_object(text))
+}
+
 // (assert condition message?) nil; Runtime error if condition is falsey.
 native_assert :: proc(vm: ^VM, args: []Value) -> Value {
 	if len(args) < 1 || len(args) > 2 {
@@ -1147,26 +1195,6 @@ install_host_module :: proc(vm: ^VM, id: string, exports: []Binding) {
 	})
 }
 
-require_string_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (string, bool) {
-	object, is_object := args[index].(^Object)
-	if !is_object || object.kind != .STRING {
-		runtime_error(fmt.tprintf("%s expects %s argument to be string", proc_name, arg_name))
-		return "", false
-	}
-
-	return (cast(^StringObject)object).text, true
-}
-
-require_int_arg :: proc(args: []Value, index: int, proc_name, arg_name: string) -> (i64, bool) {
-	value, is_int := args[index].(i64)
-	if !is_int {
-		runtime_error(fmt.tprintf("%s expects %s argument to be int", proc_name, arg_name))
-		return 0, false
-	}
-
-	return value, true
-}
-
 
 // String module ==================================================================================
 
@@ -1241,6 +1269,63 @@ native_str_split :: proc(vm: ^VM, args: []Value) -> Value {
 	}
 
 	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (join parts separator) string; Join a vector of strings with separator.
+native_str_join :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("str/join expects a vector and separator")
+		return Value{}
+	}
+
+	object, is_object := args[0].(^Object)
+	if !is_object || object.kind != .VECTOR {
+		runtime_error("str/join expects first argument to be vector")
+		return Value{}
+	}
+
+	separator, separator_ok := require_string_arg(args, 1, "str/join", "second")
+	if !separator_ok { return Value{} }
+
+	vector := cast(^VectorObject)object
+	parts := make([dynamic]string)
+	defer delete(parts)
+
+	reserve(&parts, len(vector.items))
+	for i := 0; i < len(vector.items); i += 1 {
+		part_object, part_is_object := vector.items[i].(^Object)
+		if !part_is_object || part_object.kind != .STRING {
+			runtime_error(fmt.tprintf("str/join expects vector item %d to be string", i))
+			return Value{}
+		}
+
+		append(&parts, (cast(^StringObject)part_object).text)
+	}
+
+	text := strings.join(parts[:], separator)
+	defer delete(text)
+
+	return Value(cast(^Object)new_string_object(text))
+}
+
+// (find text part) int|nil; First byte index of part in text.
+native_str_find :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("str/find expects two arguments")
+		return Value{}
+	}
+
+	text, text_ok := require_string_arg(args, 0, "str/find", "first")
+	if !text_ok { return Value{} }
+	part, part_ok := require_string_arg(args, 1, "str/find", "second")
+	if !part_ok { return Value{} }
+
+	index := strings.index(text, part)
+	if index < 0 {
+		return Value{}
+	}
+
+	return Value(i64(index))
 }
 
 // (slice text start count) string; Copy a byte range from text.
@@ -1383,27 +1468,658 @@ native_str_bytes :: proc(vm: ^VM, args: []Value) -> Value {
 }
 
 
-// Registration ==================================================================================
+// Path module ====================================================================================
+// Pure path-string transforms. These do not touch the filesystem.
 
-install_core_modules :: proc(vm: ^VM) {
-	str_exports := make([dynamic]Binding)
+// (join part...) string; Join path parts using host path rules.
+native_path_join :: proc(vm: ^VM, args: []Value) -> Value {
+	parts := make([dynamic]string)
+	defer delete(parts)
 
-	bind_native_function(vm, &str_exports, "has?", native_str_has)
-	bind_native_function(vm, &str_exports, "prefix?", native_str_prefix)
-	bind_native_function(vm, &str_exports, "suffix?", native_str_suffix)
-	bind_native_function(vm, &str_exports, "split", native_str_split)
-	bind_native_function(vm, &str_exports, "slice", native_str_slice)
-	bind_native_function(vm, &str_exports, "replace", native_str_replace)
-	bind_native_function(vm, &str_exports, "trim", native_str_trim)
-	bind_native_function(vm, &str_exports, "lower", native_str_lower)
-	bind_native_function(vm, &str_exports, "upper", native_str_upper)
-	bind_native_function(vm, &str_exports, "byte", native_str_byte)
-	bind_native_function(vm, &str_exports, "bytes", native_str_bytes)
+	for i := 0; i < len(args); i += 1 {
+		object, is_object := args[i].(^Object)
+		if !is_object || object.kind != .STRING {
+			runtime_error(fmt.tprintf("path/join expects argument %d to be string", i + 1))
+			return Value{}
+		}
 
-	install_host_module(vm, "str", str_exports[:])
-	delete(str_exports)
+		append(&parts, (cast(^StringObject)object).text)
+	}
+
+	joined, join_error := os.join_path(parts[:], context.allocator)
+	if join_error != nil {
+		runtime_error(fmt.tprintf("path/join failed to allocate result string: %v", join_error))
+		return Value{}
+	}
+	defer delete(joined)
+
+	return Value(cast(^Object)new_string_object(joined))
 }
 
+// (base path) string; Final path component.
+native_path_base :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("path/base expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "path/base", "first")
+	if !path_ok { return Value{} }
+
+	return Value(cast(^Object)new_string_object(os.base(path)))
+}
+
+// (dir path) string; Parent path portion.
+native_path_dir :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("path/dir expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "path/dir", "first")
+	if !path_ok { return Value{} }
+
+	dir, _ := os.split_path(path)
+	return Value(cast(^Object)new_string_object(dir))
+}
+
+// (ext path) string; File extension, including the dot.
+native_path_ext :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("path/ext expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "path/ext", "first")
+	if !path_ok { return Value{} }
+
+	return Value(cast(^Object)new_string_object(os.ext(path)))
+}
+
+// (stem path) string; Final path component without extension.
+native_path_stem :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("path/stem expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "path/stem", "first")
+	if !path_ok { return Value{} }
+
+	if path == "" {
+		return Value(cast(^Object)new_string_object(""))
+	}
+
+	return Value(cast(^Object)new_string_object(os.stem(path)))
+}
+
+// (clean path) string; Lexically clean redundant path components.
+native_path_clean :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("path/clean expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "path/clean", "first")
+	if !path_ok { return Value{} }
+
+	cleaned, clean_error := os.clean_path(path, context.allocator)
+	if clean_error != nil {
+		runtime_error(fmt.tprintf("path/clean failed to allocate result string: %v", clean_error))
+		return Value{}
+	}
+	defer delete(cleaned)
+
+	return Value(cast(^Object)new_string_object(cleaned))
+}
+
+// (abs path) string; Absolute path against the current working directory.
+native_path_abs :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("path/abs expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "path/abs", "first")
+	if !path_ok { return Value{} }
+
+	absolute_path, abs_error := filepath.abs(path, context.allocator)
+	if abs_error != nil {
+		runtime_error(fmt.tprintf("path/abs failed for `%s`: %v", path, abs_error))
+		return Value{}
+	}
+	defer delete(absolute_path)
+
+	return Value(cast(^Object)new_string_object(absolute_path))
+}
+
+
+// OS module ======================================================================================
+
+// (argv) vector; Raw process arguments.
+native_os_argv :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("os/argv expects no arguments")
+		return Value{}
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, len(vm.argv))
+	for arg in vm.argv {
+		append(&items, Value(cast(^Object)new_string_object(arg)))
+	}
+
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (args) vector; Script arguments.
+native_os_args :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("os/args expects no arguments")
+		return Value{}
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, len(vm.argv[vm.args_start:]))
+	for arg in vm.argv[vm.args_start:] {
+		append(&items, Value(cast(^Object)new_string_object(arg)))
+	}
+
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (env name) string|nil; Environment variable value, or nil if unset.
+native_os_env :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("os/env expects one argument")
+		return Value{}
+	}
+
+	name, name_ok := require_string_arg(args, 0, "os/env", "first")
+	if !name_ok { return Value{} }
+
+	value, found := os.lookup_env(name, context.allocator)
+	if !found {
+		return Value{}
+	}
+	defer delete(value)
+
+	return Value(cast(^Object)new_string_object(value))
+}
+
+// (set-env name value) [true nil]|[nil err]; Set an environment variable.
+native_os_set_env :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("os/set-env expects a name and value")
+		return Value{}
+	}
+
+	name, name_ok := require_string_arg(args, 0, "os/set-env", "first")
+	if !name_ok { return Value{} }
+	value, value_ok := require_string_arg(args, 1, "os/set-env", "second")
+	if !value_ok { return Value{} }
+
+	set_error := os.set_env(name, value)
+	if set_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`os/set-env` failed for `%s`: %v", name, set_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (exit code) never; Exit the process.
+native_os_exit :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("os/exit expects one argument")
+		return Value{}
+	}
+
+	code, code_ok := require_int_arg(args, 0, "os/exit", "first")
+	if !code_ok { return Value{} }
+
+	os.exit(int(code))
+}
+
+// (name) string; Operating system name.
+native_os_name :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("os/name expects no arguments")
+		return Value{}
+	}
+
+	return Value(cast(^Object)new_string_object(ODIN_OS_STRING))
+}
+
+// (arch) string; CPU architecture name.
+native_os_arch :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("os/arch expects no arguments")
+		return Value{}
+	}
+
+	return Value(cast(^Object)new_string_object(ODIN_ARCH_STRING))
+}
+
+
+// FS module ======================================================================================
+
+// (read-file path) [string nil]|[nil err]; Read a text file.
+native_fs_read_file :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/read-file expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/read-file", "first")
+	if !path_ok { return Value{} }
+
+	bytes, read_error := os.read_entire_file(path, context.allocator)
+	if read_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/read-file` failed for `%s`: %v", path, read_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+	defer delete(bytes)
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(cast(^Object)new_string_object(string(bytes))), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (write-file path text) [true nil]|[nil err]; Write text to a file.
+native_fs_write_file :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 2 {
+		runtime_error("fs/write-file expects a path and text")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/write-file", "first")
+	if !path_ok { return Value{} }
+	text, text_ok := require_string_arg(args, 1, "fs/write-file", "second")
+	if !text_ok { return Value{} }
+
+	write_error := os.write_entire_file(path, text)
+	if write_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/write-file` failed for `%s`: %v", path, write_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (cwd) [string nil]|[nil err]; Current working directory.
+native_fs_cwd :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("fs/cwd expects no arguments")
+		return Value{}
+	}
+
+	cwd, cwd_error := os.get_working_directory(context.allocator)
+	if cwd_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/cwd` failed: %v", cwd_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+	defer delete(cwd)
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(cast(^Object)new_string_object(cwd)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (set-cwd path) [true nil]|[nil err]; Change current working directory.
+native_fs_set_cwd :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/set-cwd expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/set-cwd", "first")
+	if !path_ok { return Value{} }
+
+	cwd_error := os.set_working_directory(path)
+	if cwd_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/set-cwd` failed for `%s`: %v", path, cwd_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (exists? path) bool; true if path exists.
+native_fs_exists :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/exists? expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/exists?", "first")
+	if !path_ok { return Value{} }
+
+	return Value(bool(os.exists(path)))
+}
+
+// (file? path) bool; true if path exists and is a file.
+native_fs_file :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/file? expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/file?", "first")
+	if !path_ok { return Value{} }
+
+	return Value(bool(os.is_file(path)))
+}
+
+// (dir? path) bool; true if path exists and is a directory.
+native_fs_dir :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/dir? expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/dir?", "first")
+	if !path_ok { return Value{} }
+
+	return Value(bool(os.is_dir(path)))
+}
+
+// (list-dir path) [vector nil]|[nil err]; Direct directory entry names.
+native_fs_list_dir :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/list-dir expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/list-dir", "first")
+	if !path_ok { return Value{} }
+
+	entries, list_error := os.read_all_directory_by_path(path, context.allocator)
+	if list_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/list-dir` failed for `%s`: %v", path, list_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+	defer os.file_info_slice_delete(entries, context.allocator)
+
+	entry_items := make([dynamic]Value)
+	reserve(&entry_items, len(entries))
+	for entry in entries {
+		append(&entry_items, Value(cast(^Object)new_string_object(entry.name)))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(cast(^Object)new_vector_object(entry_items)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (make-dir path) [true nil]|[nil err]; Create one directory level.
+native_fs_make_dir :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/make-dir expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/make-dir", "first")
+	if !path_ok { return Value{} }
+
+	make_error := os.make_directory(path)
+	if make_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/make-dir` failed for `%s`: %v", path, make_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (remove-file path) [true nil]|[nil err]; Remove a file.
+native_fs_remove_file :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/remove-file expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/remove-file", "first")
+	if !path_ok { return Value{} }
+
+	if !os.is_file(path) {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-file` failed for `%s`: not a file", path))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	remove_error := os.remove(path)
+	if remove_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-file` failed for `%s`: %v", path, remove_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (remove-dir path) [true nil]|[nil err]; Remove an empty directory.
+native_fs_remove_dir :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("fs/remove-dir expects one argument")
+		return Value{}
+	}
+
+	path, path_ok := require_string_arg(args, 0, "fs/remove-dir", "first")
+	if !path_ok { return Value{} }
+
+	if !os.is_dir(path) {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-dir` failed for `%s`: not a directory", path))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	remove_error := os.remove(path)
+	if remove_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`fs/remove-dir` failed for `%s`: %v", path, remove_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+
+// IO module ======================================================================================
+
+// (read-all) [string nil]|[nil err]; Read all remaining stdin.
+native_io_read_all :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("io/read-all expects no arguments")
+		return Value{}
+	}
+
+	data := make([dynamic]byte)
+	defer delete(data)
+
+	buffer: [4096]byte
+	for {
+		read_count, read_error := os.read(os.stdin, buffer[:])
+		if read_count > 0 {
+			append(&data, ..buffer[:read_count])
+		}
+
+		if read_error != nil {
+			read_io_error, read_is_io_error := read_error.(io.Error)
+			read_general_error, read_is_general_error := read_error.(os.General_Error)
+			if (read_is_io_error && read_io_error == .EOF) || (read_is_general_error && read_general_error == .Broken_Pipe) {
+				items := make([dynamic]Value)
+				reserve(&items, 2)
+				append(&items, Value(cast(^Object)new_string_object(string(data[:]))), Value{})
+				return Value(cast(^Object)new_vector_object(items))
+			}
+
+			items := make([dynamic]Value)
+			reserve(&items, 2)
+			append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/read-all` failed: %v", read_error))))
+			return Value(cast(^Object)new_vector_object(items))
+		}
+	}
+}
+
+// (read-line) [string nil]|[nil nil]|[nil err]; Read one stdin line.
+native_io_read_line :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 0 {
+		runtime_error("io/read-line expects no arguments")
+		return Value{}
+	}
+
+	line := make([dynamic]byte)
+	defer delete(line)
+
+	buffer: [1]byte
+	for {
+		read_count, read_error := os.read(os.stdin, buffer[:])
+		if read_count > 0 {
+			if buffer[0] == '\n' {
+				if len(line) > 0 && line[len(line) - 1] == '\r' {
+					pop(&line)
+				}
+
+				items := make([dynamic]Value)
+				reserve(&items, 2)
+				append(&items, Value(cast(^Object)new_string_object(string(line[:]))), Value{})
+				return Value(cast(^Object)new_vector_object(items))
+			}
+
+			append(&line, buffer[0])
+		}
+
+		if read_error != nil {
+			read_io_error, read_is_io_error := read_error.(io.Error)
+			read_general_error, read_is_general_error := read_error.(os.General_Error)
+			if (read_is_io_error && read_io_error == .EOF) || (read_is_general_error && read_general_error == .Broken_Pipe) {
+				items := make([dynamic]Value)
+				reserve(&items, 2)
+
+				if len(line) == 0 {
+					append(&items, Value{}, Value{})
+					return Value(cast(^Object)new_vector_object(items))
+				}
+
+				if line[len(line) - 1] == '\r' {
+					pop(&line)
+				}
+
+				append(&items, Value(cast(^Object)new_string_object(string(line[:]))), Value{})
+				return Value(cast(^Object)new_vector_object(items))
+			}
+
+			items := make([dynamic]Value)
+			reserve(&items, 2)
+			append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/read-line` failed: %v", read_error))))
+			return Value(cast(^Object)new_vector_object(items))
+		}
+	}
+}
+
+// (write-err text) [true nil]|[nil err]; Write exact text to stderr.
+native_io_write_err :: proc(vm: ^VM, args: []Value) -> Value {
+	if len(args) != 1 {
+		runtime_error("io/write-err expects one argument")
+		return Value{}
+	}
+
+	text, text_ok := require_string_arg(args, 0, "io/write-err", "first")
+	if !text_ok { return Value{} }
+
+	_, write_error := os.write_string(os.stderr, text)
+	if write_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/write-err` failed: %v", write_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+// (print-err value...) [true nil]|[nil err]; Print display text to stderr with newline.
+native_io_print_err :: proc(vm: ^VM, args: []Value) -> Value {
+	for i := 0; i < len(args); i += 1 {
+		if i > 0 {
+			_, space_error := os.write_string(os.stderr, " ")
+			if space_error != nil {
+				items := make([dynamic]Value)
+				reserve(&items, 2)
+				append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", space_error))))
+				return Value(cast(^Object)new_vector_object(items))
+			}
+		}
+
+		text := value_display_text(args[i])
+		_, write_error := os.write_string(os.stderr, text)
+		delete(text)
+		if write_error != nil {
+			items := make([dynamic]Value)
+			reserve(&items, 2)
+			append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", write_error))))
+			return Value(cast(^Object)new_vector_object(items))
+		}
+	}
+
+	_, newline_error := os.write_string(os.stderr, "\n")
+	if newline_error != nil {
+		items := make([dynamic]Value)
+		reserve(&items, 2)
+		append(&items, Value{}, Value(cast(^Object)new_string_object(fmt.tprintf("`io/print-err` failed: %v", newline_error))))
+		return Value(cast(^Object)new_vector_object(items))
+	}
+
+	items := make([dynamic]Value)
+	reserve(&items, 2)
+	append(&items, Value(bool(true)), Value{})
+	return Value(cast(^Object)new_vector_object(items))
+}
+
+
+// Registration ==================================================================================
 
 install_builtins :: proc(vm: ^VM) {
 	// Supplied builtins are immutable; install them exactly once per VM.
@@ -1432,6 +2148,7 @@ install_builtins :: proc(vm: ^VM) {
 	bind_native_builtin(vm, "copy", native_copy)
 	bind_native_builtin(vm, "clear", native_clear)
 	bind_native_builtin(vm, "type", native_type)
+	bind_native_builtin(vm, "str", native_str)
 	bind_native_builtin(vm, "assert", native_assert)
 	bind_native_builtin(vm, "error", native_error)
 	bind_native_builtin(vm, "push", native_push)
@@ -1445,4 +2162,79 @@ install_builtins :: proc(vm: ^VM) {
 	bind_native_builtin(vm, "merge", native_merge)
 	bind_native_builtin(vm, "print", native_print)
 	bind_native_builtin(vm, "write", native_write)
+}
+
+
+install_core_modules :: proc(vm: ^VM) {
+	// str
+	str_exports := make([dynamic]Binding)
+	defer delete(str_exports)
+
+	bind_native_function(vm, &str_exports, "has?", native_str_has)
+	bind_native_function(vm, &str_exports, "prefix?", native_str_prefix)
+	bind_native_function(vm, &str_exports, "suffix?", native_str_suffix)
+	bind_native_function(vm, &str_exports, "split", native_str_split)
+	bind_native_function(vm, &str_exports, "join", native_str_join)
+	bind_native_function(vm, &str_exports, "find", native_str_find)
+	bind_native_function(vm, &str_exports, "slice", native_str_slice)
+	bind_native_function(vm, &str_exports, "replace", native_str_replace)
+	bind_native_function(vm, &str_exports, "trim", native_str_trim)
+	bind_native_function(vm, &str_exports, "lower", native_str_lower)
+	bind_native_function(vm, &str_exports, "upper", native_str_upper)
+	bind_native_function(vm, &str_exports, "byte", native_str_byte)
+	bind_native_function(vm, &str_exports, "bytes", native_str_bytes)
+	install_host_module(vm, "str", str_exports[:])
+
+	// path
+	path_exports := make([dynamic]Binding)
+	defer delete(path_exports)
+
+	bind_native_function(vm, &path_exports, "join", native_path_join)
+	bind_native_function(vm, &path_exports, "base", native_path_base)
+	bind_native_function(vm, &path_exports, "dir", native_path_dir)
+	bind_native_function(vm, &path_exports, "ext", native_path_ext)
+	bind_native_function(vm, &path_exports, "stem", native_path_stem)
+	bind_native_function(vm, &path_exports, "clean", native_path_clean)
+	bind_native_function(vm, &path_exports, "abs", native_path_abs)
+	install_host_module(vm, "path", path_exports[:])
+
+	// os
+	os_exports := make([dynamic]Binding)
+	defer delete(os_exports)
+
+	bind_native_function(vm, &os_exports, "argv", native_os_argv)
+	bind_native_function(vm, &os_exports, "args", native_os_args)
+	bind_native_function(vm, &os_exports, "env", native_os_env)
+	bind_native_function(vm, &os_exports, "set-env", native_os_set_env)
+	bind_native_function(vm, &os_exports, "exit", native_os_exit)
+	bind_native_function(vm, &os_exports, "name", native_os_name)
+	bind_native_function(vm, &os_exports, "arch", native_os_arch)
+	install_host_module(vm, "os", os_exports[:])
+
+	// fs
+	fs_exports := make([dynamic]Binding)
+	defer delete(fs_exports)
+
+	bind_native_function(vm, &fs_exports, "read-file", native_fs_read_file)
+	bind_native_function(vm, &fs_exports, "write-file", native_fs_write_file)
+	bind_native_function(vm, &fs_exports, "cwd", native_fs_cwd)
+	bind_native_function(vm, &fs_exports, "set-cwd", native_fs_set_cwd)
+	bind_native_function(vm, &fs_exports, "exists?", native_fs_exists)
+	bind_native_function(vm, &fs_exports, "file?", native_fs_file)
+	bind_native_function(vm, &fs_exports, "dir?", native_fs_dir)
+	bind_native_function(vm, &fs_exports, "list-dir", native_fs_list_dir)
+	bind_native_function(vm, &fs_exports, "make-dir", native_fs_make_dir)
+	bind_native_function(vm, &fs_exports, "remove-file", native_fs_remove_file)
+	bind_native_function(vm, &fs_exports, "remove-dir", native_fs_remove_dir)
+	install_host_module(vm, "fs", fs_exports[:])
+
+	// io
+	io_exports := make([dynamic]Binding)
+	defer delete(io_exports)
+
+	bind_native_function(vm, &io_exports, "read-all", native_io_read_all)
+	bind_native_function(vm, &io_exports, "read-line", native_io_read_line)
+	bind_native_function(vm, &io_exports, "write-err", native_io_write_err)
+	bind_native_function(vm, &io_exports, "print-err", native_io_print_err)
+	install_host_module(vm, "io", io_exports[:])
 }

@@ -216,12 +216,20 @@ VM :: struct {
 	modules:  [dynamic]Module,
 	symbols:  [dynamic]^SymbolObject,
 
+	argv:       []string,
+	args_start: int,
+
 	// Current host-operation diagnostic; empty means no error.
 	error_string: string,
 }
 
 // Compiler and runtime entry procs select the VM used by internal helpers.
 Active_VM: ^VM
+
+set_argv :: proc(vm: ^VM, argv: []string, args_start: int) {
+	vm.argv = argv
+	vm.args_start = args_start
+}
 
 
 // Compiler data ==================================================================================

@@ -9,6 +9,7 @@ main :: proc() {
 
 	if len(os.args) == 3 && os.args[1] == "eval" {
 		vm := rite.make_vm()
+		rite.set_argv(&vm, os.args, 3)
 		result := rite.run_string(&vm, os.args[2])
 
 		if vm.error_string != "" {
@@ -35,6 +36,7 @@ main :: proc() {
 	}
 
 	vm := rite.make_vm()
+	rite.set_argv(&vm, os.args, 2)
 	_ = rite.run_file(&vm, source_path)
 
 	if vm.error_string != "" {
