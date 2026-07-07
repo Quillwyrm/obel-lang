@@ -21,7 +21,7 @@
 (def arg-root
   (if (> (len args) 0)
     (idx args 0)
-    nil))
+     nil))
 
 (def root
   (path/clean (?? arg-root (os/env "GLOC_PATH") ".")))
@@ -89,11 +89,17 @@
   (set total-lines (+ total-lines line-count)))
 
 (def (count-file file)
-  (def [text err] (fs/read-file file))
+  (cond
+    (ignored-file? file)
+      nil
 
-  (if (or err (ignored-file? file))
-    nil
-    (record-file file (count-text text))))
+    :else
+      (do
+        (def [text err] (fs/read-file file))
+
+        (if err
+          nil
+          (record-file file (count-text text))))))
 
 (def (pad-left value width)
   (def text (str value))
@@ -114,22 +120,26 @@
 (def (walk dir)
   (def [names err] (fs/list-dir dir))
 
-  (if err
-    (print "skip:" dir err)
-    (do
-      (def i 0)
+  (cond
+    err
+      (print "skip:" dir err)
 
-      (while (< i (len names))
-        (def name (idx names i))
-        (def full (path/join dir name))
+    :else
+      (do (def i 0)
+          (while (< i (len names))
 
-        (if (fs/dir? full)
-          (if (not (ignored-dir? name))
-            (walk full))
-          (if (fs/file? full)
-            (count-file full)))
+            (def name (idx names i))
+            (def full (path/join dir name))
 
-        (set i (+ i 1))))))
+            (cond
+              (fs/dir? full)
+                (if (not (ignored-dir? name))
+                  (walk full))
+
+              (fs/file? full)
+                (count-file full))
+
+            (set i (+ i 1))))))
 
 (def (print-stats)
   (print "gloc:" root)
@@ -157,9 +167,10 @@
 
     (set i (+ i 1)))
 
-  (write (pad-left "files" files-width) "  "
-         (pad-right "ext" ext-width) "  "
-         (pad-left "lines" lines-width) "\n")
+  (write
+    (pad-left "files" files-width) "  "
+    (pad-right "ext" ext-width) "  "
+    (pad-left "lines" lines-width) "\n")
 
   (set i 0)
 
@@ -176,14 +187,15 @@
   (print)(print "total" total-files "files" total-lines "lines"))
 
 
-(if (fs/dir? root)
-  (walk root)
+(cond
+  (fs/dir? root)      ;if dir?
+    (walk root)
 
-  (if (fs/file? root)
+  (fs/file? root)     ; else if file?
     (count-file root)
 
-    (do
-      (print "path not found:" root)
-      (os/exit 1))))
+  :else
+    (do (print "path not found:" root)
+        (os/exit 1)))
 
 (print-stats)

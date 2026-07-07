@@ -2027,6 +2027,7 @@ symbol_is_reserved_word :: proc(symbol: ^SymbolObject) -> bool {
 	       symbol.text == "set" ||
 	       symbol.text == "do" ||
 	       symbol.text == "if" ||
+	       symbol.text == "cond" ||
 	       symbol.text == "while" ||
 	       symbol.text == "and" ||
 	       symbol.text == "or" ||
@@ -3030,6 +3031,41 @@ compile_if :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	patch_jump_target(builder, end_jump, len(builder.bytecode))
 }
 
+compile_cond :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
+	if (len(list.items) - 1) % 2 != 0 {
+		compile_error("`cond` expects test/expression pairs")
+		return
+	}
+
+	if len(list.items) == 1 {
+		emit_load_nil(builder, dst)
+		return
+	}
+
+	end_jumps := make([dynamic]int)
+	defer delete(end_jumps)
+
+	for i := 1; i < len(list.items); i += 2 {
+		false_jump := compile_false_jump(builder, list.items[i])
+		if Compiler.failed { return }
+
+		compile_expr(builder, list.items[i + 1], dst)
+		if Compiler.failed { return }
+
+		append(&end_jumps, len(builder.bytecode))
+		emit_jump(builder, 0)
+		if Compiler.failed { return }
+
+		patch_jump_target(builder, false_jump, len(builder.bytecode))
+	}
+
+	emit_load_nil(builder, dst)
+
+	for jump in end_jumps {
+		patch_jump_target(builder, jump, len(builder.bytecode))
+	}
+}
+
 compile_and :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	if len(list.items) == 1 {
 		emit_load_true(builder, dst)
@@ -3683,6 +3719,10 @@ compile_list_expr :: proc(builder: ^CodeBuilder, list: ^ListObject, dst: int) {
 	}
 	if head.text == "if" {
 		compile_if(builder, list, dst)
+		return
+	}
+	if head.text == "cond" {
+		compile_cond(builder, list, dst)
 		return
 	}
 	if head.text == "while" {
