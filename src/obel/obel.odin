@@ -114,6 +114,9 @@ Opcode :: enum u8 {
 	MUL_CONST, // ABC: A=dst, B=lhs, C=constant index
 	DIV_CONST, // ABC: A=dst, B=lhs, C=constant index
 	MOD_CONST, // ABC: A=dst, B=lhs, C=constant index
+	MIN_CONST, // ABC: A=dst, B=lhs, C=constant index
+	MAX_CONST, // ABC: A=dst, B=lhs, C=constant index
+	CLAMP_CONST, // ABC: A=x/dst, B=lo constant index, C=hi constant index
 
 	MOD,           // ABC: A=dst, B=lhs, C=rhs
 	EQUAL,         // ABC: A=dst, B=lhs, C=rhs
@@ -1788,6 +1791,10 @@ record_slots :: proc(builder: ^CodeBuilder, slots: ..int) {
 }
 
 emit_ABC :: proc(builder: ^CodeBuilder, op: Opcode, a, b, c: int) {
+	assert(a >= 0 && a <= int(max(u8)), "ABC A operand does not fit u8")
+	assert(b >= 0 && b <= int(max(u8)), "ABC B operand does not fit u8")
+	assert(c >= 0 && c <= int(max(u8)), "ABC C operand does not fit u8")
+
 	append(&builder.bytecode, u32(InstABC{
 		op = op,
 		a  = u8(a),
@@ -1797,6 +1804,9 @@ emit_ABC :: proc(builder: ^CodeBuilder, op: Opcode, a, b, c: int) {
 }
 
 emit_ABx :: proc(builder: ^CodeBuilder, op: Opcode, a, b: int) {
+	assert(a >= 0 && a <= int(max(u8)), "ABx A operand does not fit u8")
+	assert(b >= 0 && b <= int(max(u16)), "ABx B operand does not fit u16")
+
 	append(&builder.bytecode, u32(InstABx{
 		op = op,
 		a  = u8(a),
@@ -1835,69 +1845,79 @@ emit_get_builtin :: proc(builder: ^CodeBuilder, dst, builtin_index: int) {
 }
 
 emit_add :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
-	assert(count >= 2 && count <= int(max(u8)), "ADD argument count does not fit u8")
+	assert(count >= 2, "ADD expects at least two operands")
 	record_slots(builder, dst, first_slot, first_slot + count - 1)
 	emit_ABC(builder, .ADD, dst, first_slot, count)
 }
 
 emit_sub :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
-	assert(count >= 2 && count <= int(max(u8)), "SUB argument count does not fit u8")
+	assert(count >= 2, "SUB expects at least two operands")
 	record_slots(builder, dst, first_slot, first_slot + count - 1)
 	emit_ABC(builder, .SUB, dst, first_slot, count)
 }
 
 emit_mul :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
-	assert(count >= 2 && count <= int(max(u8)), "MUL argument count does not fit u8")
+	assert(count >= 2, "MUL expects at least two operands")
 	record_slots(builder, dst, first_slot, first_slot + count - 1)
 	emit_ABC(builder, .MUL, dst, first_slot, count)
 }
 
 emit_div :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
-	assert(count >= 2 && count <= int(max(u8)), "DIV argument count does not fit u8")
+	assert(count >= 2, "DIV expects at least two operands")
 	record_slots(builder, dst, first_slot, first_slot + count - 1)
 	emit_ABC(builder, .DIV, dst, first_slot, count)
 }
 
 emit_min :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
-	assert(count >= 2 && count <= int(max(u8)), "MIN argument count does not fit u8")
+	assert(count >= 2, "MIN expects at least two operands")
 	record_slots(builder, dst, first_slot, first_slot + count - 1)
 	emit_ABC(builder, .MIN, dst, first_slot, count)
 }
 
 emit_max :: proc(builder: ^CodeBuilder, dst, first_slot, count: int) {
-	assert(count >= 2 && count <= int(max(u8)), "MAX argument count does not fit u8")
+	assert(count >= 2, "MAX expects at least two operands")
 	record_slots(builder, dst, first_slot, first_slot + count - 1)
 	emit_ABC(builder, .MAX, dst, first_slot, count)
 }
 
 emit_add_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "ADD_CONST constant index does not fit u8")
 	record_slots(builder, dst, lhs)
 	emit_ABC(builder, .ADD_CONST, dst, lhs, constant_index)
 }
 
 emit_sub_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "SUB_CONST constant index does not fit u8")
 	record_slots(builder, dst, lhs)
 	emit_ABC(builder, .SUB_CONST, dst, lhs, constant_index)
 }
 
 emit_mul_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "MUL_CONST constant index does not fit u8")
 	record_slots(builder, dst, lhs)
 	emit_ABC(builder, .MUL_CONST, dst, lhs, constant_index)
 }
 
 emit_div_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "DIV_CONST constant index does not fit u8")
 	record_slots(builder, dst, lhs)
 	emit_ABC(builder, .DIV_CONST, dst, lhs, constant_index)
 }
 
 emit_mod_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "MOD_CONST constant index does not fit u8")
 	record_slots(builder, dst, lhs)
 	emit_ABC(builder, .MOD_CONST, dst, lhs, constant_index)
+}
+
+emit_min_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
+	record_slots(builder, dst, lhs)
+	emit_ABC(builder, .MIN_CONST, dst, lhs, constant_index)
+}
+
+emit_max_const :: proc(builder: ^CodeBuilder, dst, lhs, constant_index: int) {
+	record_slots(builder, dst, lhs)
+	emit_ABC(builder, .MAX_CONST, dst, lhs, constant_index)
+}
+
+emit_clamp_const :: proc(builder: ^CodeBuilder, dst, lo_constant_index, hi_constant_index: int) {
+	record_slots(builder, dst)
+	emit_ABC(builder, .CLAMP_CONST, dst, lo_constant_index, hi_constant_index)
 }
 
 emit_mod :: proc(builder: ^CodeBuilder, dst, lhs, rhs: int) {
@@ -1951,8 +1971,6 @@ emit_len :: proc(builder: ^CodeBuilder, dst, src: int) {
 }
 
 emit_call :: proc(builder: ^CodeBuilder, base, argument_count: int) {
-	assert(argument_count >= 0 && argument_count <= int(max(u8)), "call argument count does not fit u8")
-
 	record_slots(builder, base)
 	if argument_count > 0 {
 		record_slots(builder, base + argument_count)
@@ -1961,13 +1979,11 @@ emit_call :: proc(builder: ^CodeBuilder, base, argument_count: int) {
 }
 
 emit_new_vector :: proc(builder: ^CodeBuilder, dst, capacity: int) {
-	assert(capacity >= 0 && capacity <= int(max(u16)), "vector capacity does not fit u16")
 	record_slots(builder, dst)
 	emit_ABx(builder, .NEW_VECTOR, dst, capacity)
 }
 
 emit_new_map :: proc(builder: ^CodeBuilder, dst, capacity: int) {
-	assert(capacity >= 0 && capacity <= int(max(u16)), "map capacity does not fit u16")
 	record_slots(builder, dst)
 	emit_ABx(builder, .NEW_MAP, dst, capacity)
 }
@@ -1983,7 +1999,7 @@ emit_vector_pop :: proc(builder: ^CodeBuilder, dst, vector_slot: int) {
 }
 
 emit_unpack_vector :: proc(builder: ^CodeBuilder, source_slot, first_dst, count: int) {
-	assert(count > 0 && count <= int(max(u8)), "vector destructuring count does not fit u8")
+	assert(count > 0, "vector destructuring count must be positive")
 	record_slots(builder, source_slot, first_dst, first_dst + count - 1)
 	emit_ABC(builder, .UNPACK_VECTOR, source_slot, first_dst, count)
 }
@@ -1994,7 +2010,6 @@ emit_vector_get :: proc(builder: ^CodeBuilder, dst, vector_slot, index_slot: int
 }
 
 emit_vector_get_const :: proc(builder: ^CodeBuilder, dst, vector_slot, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "VECTOR_GET_CONST constant index does not fit u8")
 	record_slots(builder, dst, vector_slot)
 	emit_ABC(builder, .VECTOR_GET_CONST, dst, vector_slot, constant_index)
 }
@@ -2005,7 +2020,6 @@ emit_vector_set :: proc(builder: ^CodeBuilder, vector_slot, index_slot, value_sl
 }
 
 emit_vector_set_const :: proc(builder: ^CodeBuilder, vector_slot, constant_index, value_slot: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "VECTOR_SET_CONST constant index does not fit u8")
 	record_slots(builder, vector_slot, value_slot)
 	emit_ABC(builder, .VECTOR_SET_CONST, vector_slot, constant_index, value_slot)
 }
@@ -2016,7 +2030,6 @@ emit_map_get :: proc(builder: ^CodeBuilder, dst, map_slot, key_slot: int) {
 }
 
 emit_map_get_const :: proc(builder: ^CodeBuilder, dst, map_slot, constant_index: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "MAP_GET_CONST constant index does not fit u8")
 	record_slots(builder, dst, map_slot)
 	emit_ABC(builder, .MAP_GET_CONST, dst, map_slot, constant_index)
 }
@@ -2027,7 +2040,6 @@ emit_map_set :: proc(builder: ^CodeBuilder, map_slot, key_slot, value_slot: int)
 }
 
 emit_map_set_const :: proc(builder: ^CodeBuilder, map_slot, constant_index, value_slot: int) {
-	assert(constant_index >= 0 && constant_index <= int(max(u8)), "MAP_SET_CONST constant index does not fit u8")
 	record_slots(builder, map_slot, value_slot)
 	emit_ABC(builder, .MAP_SET_CONST, map_slot, constant_index, value_slot)
 }
@@ -2070,25 +2082,21 @@ emit_each_end :: proc(builder: ^CodeBuilder, state_base, collection_slot: int) {
 }
 
 emit_load_function :: proc(builder: ^CodeBuilder, dst, child_code_index: int) {
-	assert(child_code_index >= 0 && child_code_index <= int(max(u16)), "child code index does not fit u16")
 	record_slots(builder, dst)
 	emit_ABx(builder, .LOAD_FUNCTION, dst, child_code_index)
 }
 
 emit_get_upvalue :: proc(builder: ^CodeBuilder, dst, upvalue_index: int) {
-	assert(upvalue_index >= 0 && upvalue_index <= int(max(u16)), "upvalue index does not fit u16")
 	record_slots(builder, dst)
 	emit_ABx(builder, .GET_UPVALUE, dst, upvalue_index)
 }
 
 emit_set_upvalue :: proc(builder: ^CodeBuilder, upvalue_index, src: int) {
-	assert(upvalue_index >= 0 && upvalue_index <= int(max(u16)), "upvalue index does not fit u16")
 	record_slots(builder, src)
 	emit_ABx(builder, .SET_UPVALUE, src, upvalue_index)
 }
 
 emit_close_upvalues :: proc(builder: ^CodeBuilder, first_slot: int) {
-	assert(first_slot >= 0 && first_slot <= int(max(u8)), "close slot does not fit u8")
 	emit_ABx(builder, .CLOSE_UPVALUES, first_slot, 0)
 }
 
@@ -2110,13 +2118,11 @@ emit_jump :: proc(builder: ^CodeBuilder, target_index: int) {
 }
 
 emit_jump_if_falsey :: proc(builder: ^CodeBuilder, cond_slot, target_index: int) {
-	assert(target_index >= 0 && target_index <= int(max(u16)), "jump target does not fit u16")
 	record_slots(builder, cond_slot)
 	emit_ABx(builder, .JUMP_IF_FALSEY, cond_slot, target_index)
 }
 
 emit_jump_if_nil :: proc(builder: ^CodeBuilder, slot, target_index: int) {
-	assert(target_index >= 0 && target_index <= int(max(u16)), "jump target does not fit u16")
 	record_slots(builder, slot)
 	emit_ABx(builder, .JUMP_IF_NIL, slot, target_index)
 }
@@ -3918,6 +3924,32 @@ compile_builtin_fast_path :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, 
 			return
 		}
 
+		if operand_count == 2 {
+			rhs_constant, rhs_is_constant := constant_from_form(args[1])
+			if rhs_is_constant {
+				constant_index := intern_constant(builder, rhs_constant)
+				if Compiler.failed { return }
+
+				if constant_index <= int(max(u8)) {
+					lhs_slot, lhs_is_local := local_symbol_slot(builder, args[0])
+					if !lhs_is_local {
+						lhs_slot = claim_slot(builder)
+						if Compiler.failed { return }
+
+						compile_expr(builder, args[0], lhs_slot)
+						if Compiler.failed { return }
+					}
+
+					if symbol.text == "min" {
+						emit_min_const(builder, dst, lhs_slot, constant_index)
+					} else {
+						emit_max_const(builder, dst, lhs_slot, constant_index)
+					}
+					return
+				}
+			}
+		}
+
 		operand_base := builder.next_slot
 		reserve_slots_until(builder, operand_base + operand_count)
 		if Compiler.failed { return }
@@ -3938,10 +3970,10 @@ compile_builtin_fast_path :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, 
 	if symbol.text == "%" ||
 	   symbol.text == "=" ||
 	   symbol.text == "!=" ||
-	    symbol.text == "<" ||
-	    symbol.text == "<=" ||
-	    symbol.text == ">" ||
-	    symbol.text == ">=" {
+	   symbol.text == "<" ||
+	   symbol.text == "<=" ||
+	   symbol.text == ">" ||
+	   symbol.text == ">=" {
 		lhs_slot, lhs_is_local := local_symbol_slot(builder, args[0])
 		if !lhs_is_local {
 			lhs_slot = claim_slot(builder)
@@ -4015,6 +4047,23 @@ compile_builtin_fast_path :: proc(builder: ^CodeBuilder, symbol: ^SymbolObject, 
 	if symbol.text == "clamp" {
 		operand_count := len(args)
 		assert(operand_count == 3, "clamp fast path expects three operands")
+
+		lo_constant, lo_is_constant := constant_from_form(args[1])
+		hi_constant, hi_is_constant := constant_from_form(args[2])
+		if lo_is_constant && hi_is_constant {
+			lo_constant_index := intern_constant(builder, lo_constant)
+			if Compiler.failed { return }
+			hi_constant_index := intern_constant(builder, hi_constant)
+			if Compiler.failed { return }
+
+			if lo_constant_index <= int(max(u8)) && hi_constant_index <= int(max(u8)) {
+				compile_expr(builder, args[0], dst)
+				if Compiler.failed { return }
+
+				emit_clamp_const(builder, dst, lo_constant_index, hi_constant_index)
+				return
+			}
+		}
 
 		operand_base := builder.next_slot
 		reserve_slots_until(builder, operand_base + operand_count)
@@ -4918,6 +4967,45 @@ run_vm :: proc(vm: ^VM) -> Value {
 			}
 
 			result := op_mod(lhs, rhs)
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
+		case .MIN_CONST:
+			inst := InstABC(word)
+			dst := slot_base + int(inst.a)
+			lhs := vm.slots[slot_base + int(inst.b)]
+			constant_index := int(inst.c)
+			assert(constant_index < len(constants), "constant index out of range")
+			rhs := constants[constant_index]
+
+			result := op_min_binary(lhs, rhs)
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
+		case .MAX_CONST:
+			inst := InstABC(word)
+			dst := slot_base + int(inst.a)
+			lhs := vm.slots[slot_base + int(inst.b)]
+			constant_index := int(inst.c)
+			assert(constant_index < len(constants), "constant index out of range")
+			rhs := constants[constant_index]
+
+			result := op_max_binary(lhs, rhs)
+			if vm.error_string != "" { return Value{} }
+			vm.slots[dst] = result
+
+		case .CLAMP_CONST:
+			inst := InstABC(word)
+			dst := slot_base + int(inst.a)
+			x := vm.slots[dst]
+			lo_index := int(inst.b)
+			assert(lo_index < len(constants), "constant index out of range")
+			lo := constants[lo_index]
+			hi_index := int(inst.c)
+			assert(hi_index < len(constants), "constant index out of range")
+			hi := constants[hi_index]
+
+			result := op_clamp(x, lo, hi)
 			if vm.error_string != "" { return Value{} }
 			vm.slots[dst] = result
 

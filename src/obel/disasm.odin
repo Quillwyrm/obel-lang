@@ -158,48 +158,67 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 		case .ADD, .SUB, .MUL, .DIV, .MIN, .MAX:
 			inst := InstABC(word)
 			op_name := "ADD"
-			if op == .SUB {
+			#partial switch op {
+			case .SUB:
 				op_name = "SUB"
-			} else if op == .MUL {
+			case .MUL:
 				op_name = "MUL"
-			} else if op == .DIV {
+			case .DIV:
 				op_name = "DIV"
-			} else if op == .MIN {
+			case .MIN:
 				op_name = "MIN"
-			} else if op == .MAX {
+			case .MAX:
 				op_name = "MAX"
 			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, %d", inst.a, inst.b, inst.c), "")
 
-		case .ADD_CONST, .SUB_CONST, .MUL_CONST, .DIV_CONST, .MOD_CONST:
+		case .ADD_CONST, .SUB_CONST, .MUL_CONST, .DIV_CONST, .MOD_CONST, .MIN_CONST, .MAX_CONST:
 			inst := InstABC(word)
 			op_name := "ADD_CONST"
-			if op == .SUB_CONST {
+			#partial switch op {
+			case .SUB_CONST:
 				op_name = "SUB_CONST"
-			} else if op == .MUL_CONST {
+			case .MUL_CONST:
 				op_name = "MUL_CONST"
-			} else if op == .DIV_CONST {
+			case .DIV_CONST:
 				op_name = "DIV_CONST"
-			} else if op == .MOD_CONST {
+			case .MOD_CONST:
 				op_name = "MOD_CONST"
+			case .MIN_CONST:
+				op_name = "MIN_CONST"
+			case .MAX_CONST:
+				op_name = "MAX_CONST"
 			}
 			comment := disasm_value_text(code.constants[int(inst.c)])
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, C%d", inst.a, inst.b, inst.c), comment)
 
+		case .CLAMP_CONST:
+			inst := InstABC(word)
+			lo_comment := disasm_value_text(code.constants[int(inst.b)])
+			hi_comment := disasm_value_text(code.constants[int(inst.c)])
+			disasm_append_inst(
+				parts,
+				ip,
+				"CLAMP_CONST",
+				fmt.tprintf("R%d, C%d, C%d", inst.a, inst.b, inst.c),
+				fmt.tprintf("%s, %s", lo_comment, hi_comment),
+			)
+
 		case .MOD, .EQUAL, .LESS, .LESS_EQUAL, .GREATER, .GREATER_EQUAL, .CLAMP:
 			inst := InstABC(word)
 			op_name := "MOD"
-			if op == .EQUAL {
+			#partial switch op {
+			case .EQUAL:
 				op_name = "EQUAL"
-			} else if op == .LESS {
+			case .LESS:
 				op_name = "LESS"
-			} else if op == .LESS_EQUAL {
+			case .LESS_EQUAL:
 				op_name = "LESS_EQUAL"
-			} else if op == .GREATER {
+			case .GREATER:
 				op_name = "GREATER"
-			} else if op == .GREATER_EQUAL {
+			case .GREATER_EQUAL:
 				op_name = "GREATER_EQUAL"
-			} else if op == .CLAMP {
+			case .CLAMP:
 				op_name = "CLAMP"
 			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, R%d", inst.a, inst.b, inst.c), "")
@@ -207,9 +226,10 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 		case .NOT, .LEN, .ABS:
 			inst := InstABC(word)
 			op_name := "NOT"
-			if op == .LEN {
+			#partial switch op {
+			case .LEN:
 				op_name = "LEN"
-			} else if op == .ABS {
+			case .ABS:
 				op_name = "ABS"
 			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d", inst.a, inst.b), "")
@@ -310,11 +330,12 @@ disasm_append_code :: proc(parts: ^[dynamic]string, code: ^Code) {
 			inst := InstABC(word)
 			target := code.bytecode[ip + 1]
 			op_name := "JUMP_IF_NOT_LESS"
-			if op == .JUMP_IF_NOT_LESS_EQUAL {
+			#partial switch op {
+			case .JUMP_IF_NOT_LESS_EQUAL:
 				op_name = "JUMP_IF_NOT_LESS_EQUAL"
-			} else if op == .JUMP_IF_NOT_GREATER {
+			case .JUMP_IF_NOT_GREATER:
 				op_name = "JUMP_IF_NOT_GREATER"
-			} else if op == .JUMP_IF_NOT_GREATER_EQUAL {
+			case .JUMP_IF_NOT_GREATER_EQUAL:
 				op_name = "JUMP_IF_NOT_GREATER_EQUAL"
 			}
 			disasm_append_inst(parts, ip, op_name, fmt.tprintf("R%d, R%d, %d", inst.a, inst.b, target), "")

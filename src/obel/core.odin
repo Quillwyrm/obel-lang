@@ -553,10 +553,78 @@ value_is_number :: proc(value: Value) -> bool {
 	return is_int || is_float
 }
 
+op_min_binary :: proc(lhs, rhs: Value) -> Value {
+	if !value_is_number(lhs) {
+		runtime_error("`min` expected int or float arguments.")
+		return Value{}
+	}
+
+	if !value_is_number(rhs) {
+		runtime_error("`min` expected int or float arguments.")
+		return Value{}
+	}
+
+	_, lhs_is_float := lhs.(f64)
+	_, rhs_is_float := rhs.(f64)
+	has_float := lhs_is_float || rhs_is_float
+	result := lhs
+
+	if compare_numbers(rhs, lhs, .LESS) {
+		result = rhs
+	}
+
+	if has_float {
+		#partial switch value in result {
+		case i64:
+			return Value(f64(value))
+		case f64:
+			return result
+		}
+	}
+
+	return result
+}
+
+op_max_binary :: proc(lhs, rhs: Value) -> Value {
+	if !value_is_number(lhs) {
+		runtime_error("`max` expected int or float arguments.")
+		return Value{}
+	}
+
+	if !value_is_number(rhs) {
+		runtime_error("`max` expected int or float arguments.")
+		return Value{}
+	}
+
+	_, lhs_is_float := lhs.(f64)
+	_, rhs_is_float := rhs.(f64)
+	has_float := lhs_is_float || rhs_is_float
+	result := lhs
+
+	if compare_numbers(rhs, lhs, .GREATER) {
+		result = rhs
+	}
+
+	if has_float {
+		#partial switch value in result {
+		case i64:
+			return Value(f64(value))
+		case f64:
+			return result
+		}
+	}
+
+	return result
+}
+
 op_min :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("`min` expects two or more arguments.\nusage: (min number number...)")
 		return Value{}
+	}
+
+	if len(args) == 2 {
+		return op_min_binary(args[0], args[1])
 	}
 
 	if !value_is_number(args[0]) {
@@ -597,6 +665,10 @@ op_max :: proc(args: []Value) -> Value {
 	if len(args) < 2 {
 		runtime_error("`max` expects two or more arguments.\nusage: (max number number...)")
 		return Value{}
+	}
+
+	if len(args) == 2 {
+		return op_max_binary(args[0], args[1])
 	}
 
 	if !value_is_number(args[0]) {
